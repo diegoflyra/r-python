@@ -171,6 +171,9 @@ pub enum Expression {
     // Function call
     FuncCall(Name, Vec<Expression>),
 
+    // Call whose target is an arbitrary expression (e.g. f(1)(2), (lambda ... end)(5))
+    IndirectCall(Box<Expression>, Vec<Expression>),
+
     // Arithmetic expressions over numbers
     Add(Box<Expression>, Box<Expression>),
     Sub(Box<Expression>, Box<Expression>),

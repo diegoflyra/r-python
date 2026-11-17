@@ -129,6 +129,16 @@ impl Expression {
                     group(concat(text("("), concat(nest(4, joined), text(")")))),
                 )
             }
+            Expression::IndirectCall(target, args) => {
+                let arg_docs: Vec<Rc<Doc>> =
+                    args.iter().map(|a| a.to_doc_inner(PREC_NONE)).collect();
+                let sep = concat(text(","), line());
+                let joined = punctuate(sep, &arg_docs);
+                concat(
+                    target.to_doc_inner(PREC_CALL),
+                    group(concat(text("("), concat(nest(4, joined), text(")")))),
+                )
+            }
 
             Expression::ListValue(elements) => {
                 let elem_docs: Vec<Rc<Doc>> =

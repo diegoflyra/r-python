@@ -546,3 +546,103 @@ assert(area_c == 75, "area of circle with radius 5 should be 75");"#;
         assert_ne!(rest.trim(), "");
     }
 }
+
+mod closure_tests {
+    use super::*;
+
+    #[test]
+    fn test_program_with_multi_statement_lambda() {
+        let input =
+            "val f = lambda (x: Int) -> Int: var t = x * 2; return t + 1; end; val r = f(3);";
+        let expected = vec![
+            Statement::ValDeclaration(
+                "f".to_string(),
+                Box::new(Expression::Lambda(Function {
+                    name: "".to_string(),
+                    kind: Type::TInteger,
+                    params: vec![FormalArgument::new("x".to_string(), Type::TInteger)],
+                    body: Some(Box::new(Statement::Block(vec![
+                        Statement::VarDeclaration(
+                            "t".to_string(),
+                            Box::new(Expression::Mul(
+                                Box::new(Expression::Var("x".to_string())),
+                                Box::new(Expression::CInt(2)),
+                            )),
+                        ),
+                        Statement::Return(Box::new(Expression::Add(
+                            Box::new(Expression::Var("t".to_string())),
+                            Box::new(Expression::CInt(1)),
+                        ))),
+                    ]))),
+                })),
+            ),
+            Statement::ValDeclaration(
+                "r".to_string(),
+                Box::new(Expression::FuncCall(
+                    "f".to_string(),
+                    vec![Expression::CInt(3)],
+                )),
+            ),
+        ];
+        let (rest, statements) = parse(input).unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(statements, expected);
+    }
+
+    #[test]
+    fn test_program_with_closure_factory_and_chained_call() {
+        let input = r#"def make_adder(n: Int) -> Int:
+    return lambda (x: Int) -> Int: return x + n end;
+end;
+val r = make_adder(5)(10);"#;
+        let expected = vec![
+            Statement::FuncDef(Function {
+                name: "make_adder".to_string(),
+                kind: Type::TInteger,
+                params: vec![FormalArgument::new("n".to_string(), Type::TInteger)],
+                body: Some(Box::new(Statement::Block(vec![Statement::Return(
+                    Box::new(Expression::Lambda(Function {
+                        name: "".to_string(),
+                        kind: Type::TInteger,
+                        params: vec![FormalArgument::new("x".to_string(), Type::TInteger)],
+                        body: Some(Box::new(Statement::Block(vec![Statement::Return(
+                            Box::new(Expression::Add(
+                                Box::new(Expression::Var("x".to_string())),
+                                Box::new(Expression::Var("n".to_string())),
+                            )),
+                        )]))),
+                    })),
+                )]))),
+            }),
+            Statement::ValDeclaration(
+                "r".to_string(),
+                Box::new(Expression::IndirectCall(
+                    Box::new(Expression::FuncCall(
+                        "make_adder".to_string(),
+                        vec![Expression::CInt(5)],
+                    )),
+                    vec![Expression::CInt(10)],
+                )),
+            ),
+        ];
+        let (rest, statements) = parse(input).unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(statements, expected);
+    }
+
+    #[test]
+    fn test_chained_call_as_expression_statement() {
+        let (rest, stmt) = parse_statement("f(1)(2)").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            stmt,
+            Statement::ExprStmt(Box::new(Expression::IndirectCall(
+                Box::new(Expression::FuncCall(
+                    "f".to_string(),
+                    vec![Expression::CInt(1)]
+                )),
+                vec![Expression::CInt(2)],
+            )))
+        );
+    }
+}

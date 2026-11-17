@@ -11,13 +11,12 @@ use nom::{
 
 use std::str::FromStr;
 
+use crate::ir::ast::Expression;
 use crate::ir::ast::Function;
-use crate::ir::ast::Statement;
 use crate::parser::parser_common::{
     identifier,
     is_string_char,
     keyword,
-    COLON_CHAR,
     // Other character constants
     COMMA_CHAR,
     FUNCTION_ARROW,
@@ -28,9 +27,8 @@ use crate::parser::parser_common::{
     RIGHT_BRACKET,
     RIGHT_PAREN,
 };
-use crate::parser::parser_stmt::{parse_formal_argument, parse_return_statement};
+use crate::parser::parser_stmt::{parse_block, parse_formal_argument};
 use crate::parser::parser_type::parse_type;
-use crate::{ir::ast::Expression, parser::parser_common::END_KEYWORD};
 
 pub fn parse_expression(input: &str) -> IResult<&str, Expression> {
     parse_or(input)
@@ -116,7 +114,21 @@ fn parse_term(input: &str) -> IResult<&str, Expression> {
     )(input)
 }
 
+// Parses a primary expression followed by zero or more argument lists (e.g. f(1)(2)).
+// Calls on a plain identifier keep producing FuncCall; any other target is an IndirectCall.
 fn parse_factor(input: &str) -> IResult<&str, Expression> {
+    let (input, base) = parse_primary(input)?;
+    fold_many0(
+        parse_actual_arguments,
+        move || base.clone(),
+        |acc, args| match acc {
+            Expression::Var(name) => Expression::FuncCall(name, args),
+            other => Expression::IndirectCall(Box::new(other), args),
+        },
+    )(input)
+}
+
+fn parse_primary(input: &str) -> IResult<&str, Expression> {
     alt((
         parse_bool,
         parse_maybe_result_constructors,
@@ -124,7 +136,6 @@ fn parse_factor(input: &str) -> IResult<&str, Expression> {
         parse_number,
         parse_string,
         parse_list,
-        parse_function_call,
         parse_var,
         parse_paren_or_tuple,
         parse_lambda,
@@ -295,19 +306,15 @@ pub fn parse_lambda(input: &str) -> IResult<&str, Expression> {
                 char::<&str, Error<&str>>(RIGHT_PAREN),
             ),
             preceded(multispace0, tag(FUNCTION_ARROW)),
-            delimited(
-                multispace0,
-                parse_type,
-                char::<&str, Error<&str>>(COLON_CHAR),
-            ),
-            delimited(multispace0, parse_return_statement, keyword(END_KEYWORD)),
+            preceded(multispace0, parse_type),
+            parse_block,
         )),
-        |(_, args, _, t, return_stmt)| {
+        |(_, args, _, t, block)| {
             Expression::Lambda(Function {
                 name: "".to_string(),
                 kind: t,
                 params: args,
-                body: Some(Box::new(Statement::Block(vec![return_stmt]))),
+                body: Some(Box::new(block)),
             })
         },
     )(input)
@@ -371,12 +378,6 @@ fn parse_string(input: &str) -> IResult<&str, Expression> {
 
 fn parse_var(input: &str) -> IResult<&str, Expression> {
     map(identifier, |v| Expression::Var(v.into()))(input)
-}
-
-fn parse_function_call(input: &str) -> IResult<&str, Expression> {
-    let (input, name) = identifier(input)?;
-    let (input, args) = parse_actual_arguments(input)?;
-    Ok((input, Expression::FuncCall(name.to_string(), args)))
 }
 
 pub fn parse_actual_arguments(input: &str) -> IResult<&str, Vec<Expression>> {
@@ -638,12 +639,244 @@ mod tests {
 #[cfg(test)]
 mod lambda_tests {
     use super::*;
+    use crate::ir::ast::{FormalArgument, Statement, Type};
+
+    fn int_arg(name: &str) -> FormalArgument {
+        FormalArgument::new(name.to_string(), Type::TInteger)
+    }
+
+    fn lambda(params: Vec<FormalArgument>, kind: Type, body: Vec<Statement>) -> Expression {
+        Expression::Lambda(Function {
+            name: "".to_string(),
+            kind,
+            params,
+            body: Some(Box::new(Statement::Block(body))),
+        })
+    }
+
+    fn var(name: &str) -> Box<Expression> {
+        Box::new(Expression::Var(name.to_string()))
+    }
 
     #[test]
     fn test_parse_lambda_simple() {
         let input = "lambda (x: Int) -> Int: return x end";
-        let result = parse_lambda(input);
-        println!("{:?}", result);
-        assert!(result.is_ok());
+        let expected = lambda(
+            vec![int_arg("x")],
+            Type::TInteger,
+            vec![Statement::Return(var("x"))],
+        );
+        assert_eq!(parse_lambda(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_no_params() {
+        let input = "lambda () -> Int: return 1 end";
+        let expected = lambda(
+            vec![],
+            Type::TInteger,
+            vec![Statement::Return(Box::new(Expression::CInt(1)))],
+        );
+        assert_eq!(parse_lambda(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_multiple_params() {
+        let input = "lambda (x: Int, y: Int) -> Int: return x + y end";
+        let expected = lambda(
+            vec![int_arg("x"), int_arg("y")],
+            Type::TInteger,
+            vec![Statement::Return(Box::new(Expression::Add(
+                var("x"),
+                var("y"),
+            )))],
+        );
+        assert_eq!(parse_lambda(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_return_with_semicolon() {
+        let input = "lambda (x: Int) -> Int: return x; end";
+        let expected = lambda(
+            vec![int_arg("x")],
+            Type::TInteger,
+            vec![Statement::Return(var("x"))],
+        );
+        assert_eq!(parse_lambda(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_multiline_block() {
+        let input = "lambda (x: Int) -> Int:\n    var temp = x * 2;\n    return temp + 1;\nend";
+        let expected = lambda(
+            vec![int_arg("x")],
+            Type::TInteger,
+            vec![
+                Statement::VarDeclaration(
+                    "temp".to_string(),
+                    Box::new(Expression::Mul(var("x"), Box::new(Expression::CInt(2)))),
+                ),
+                Statement::Return(Box::new(Expression::Add(
+                    var("temp"),
+                    Box::new(Expression::CInt(1)),
+                ))),
+            ],
+        );
+        assert_eq!(parse_lambda(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_with_control_flow() {
+        let input = "lambda (x: Int) -> Int: if x > 0: return x; else: return 0; end end";
+        let expected = lambda(
+            vec![int_arg("x")],
+            Type::TInteger,
+            vec![Statement::IfChain {
+                branches: vec![(
+                    Box::new(Expression::GT(var("x"), Box::new(Expression::CInt(0)))),
+                    Box::new(Statement::Block(vec![Statement::Return(var("x"))])),
+                )],
+                else_branch: Some(Box::new(Statement::Block(vec![Statement::Return(
+                    Box::new(Expression::CInt(0)),
+                )]))),
+            }],
+        );
+        assert_eq!(parse_lambda(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_capturing_outer_variable() {
+        let input = "lambda (x: Int) -> Int: return x + n end";
+        let expected = lambda(
+            vec![int_arg("x")],
+            Type::TInteger,
+            vec![Statement::Return(Box::new(Expression::Add(
+                var("x"),
+                var("n"),
+            )))],
+        );
+        assert_eq!(parse_expression(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_requires_end() {
+        assert!(parse_lambda("lambda (x: Int) -> Int: return x").is_err());
+    }
+
+    #[test]
+    fn test_parse_lambda_requires_colon() {
+        assert!(parse_lambda("lambda (x: Int) -> Int return x end").is_err());
+    }
+}
+
+#[cfg(test)]
+mod call_tests {
+    use super::*;
+    use crate::ir::ast::{FormalArgument, Statement, Type};
+
+    fn int(n: i32) -> Expression {
+        Expression::CInt(n)
+    }
+
+    #[test]
+    fn test_parse_call_on_identifier_is_func_call() {
+        assert_eq!(
+            parse_expression("f(1, 2)"),
+            Ok((
+                "",
+                Expression::FuncCall("f".to_string(), vec![int(1), int(2)])
+            ))
+        );
+        assert_eq!(
+            parse_expression("f()"),
+            Ok(("", Expression::FuncCall("f".to_string(), vec![])))
+        );
+    }
+
+    #[test]
+    fn test_parse_call_with_space_before_arguments() {
+        assert_eq!(
+            parse_expression("f (1)"),
+            Ok(("", Expression::FuncCall("f".to_string(), vec![int(1)])))
+        );
+    }
+
+    #[test]
+    fn test_parse_chained_call() {
+        let expected = Expression::IndirectCall(
+            Box::new(Expression::FuncCall("make_adder".to_string(), vec![int(5)])),
+            vec![int(10)],
+        );
+        assert_eq!(parse_expression("make_adder(5)(10)"), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_chained_call_is_left_associative() {
+        let expected = Expression::IndirectCall(
+            Box::new(Expression::IndirectCall(
+                Box::new(Expression::FuncCall("f".to_string(), vec![int(1)])),
+                vec![int(2)],
+            )),
+            vec![int(3)],
+        );
+        assert_eq!(parse_expression("f(1)(2)(3)"), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_lambda_immediate_call() {
+        let input = "(lambda (x: Int) -> Int: return x + 1 end)(5)";
+        let expected = Expression::IndirectCall(
+            Box::new(Expression::Lambda(Function {
+                name: "".to_string(),
+                kind: Type::TInteger,
+                params: vec![FormalArgument::new("x".to_string(), Type::TInteger)],
+                body: Some(Box::new(Statement::Block(vec![Statement::Return(
+                    Box::new(Expression::Add(
+                        Box::new(Expression::Var("x".to_string())),
+                        Box::new(int(1)),
+                    )),
+                )]))),
+            })),
+            vec![int(5)],
+        );
+        assert_eq!(parse_expression(input), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_chained_call_precedence() {
+        // Calls bind tighter than arithmetic: f(1)(2) + 3 == (f(1)(2)) + 3
+        let expected = Expression::Add(
+            Box::new(Expression::IndirectCall(
+                Box::new(Expression::FuncCall("f".to_string(), vec![int(1)])),
+                vec![int(2)],
+            )),
+            Box::new(int(3)),
+        );
+        assert_eq!(parse_expression("f(1)(2) + 3"), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_chained_call_as_argument() {
+        let expected = Expression::FuncCall(
+            "g".to_string(),
+            vec![Expression::IndirectCall(
+                Box::new(Expression::FuncCall("f".to_string(), vec![int(1)])),
+                vec![int(2)],
+            )],
+        );
+        assert_eq!(parse_expression("g(f(1)(2))"), Ok(("", expected)));
+    }
+
+    #[test]
+    fn test_parse_incomplete_call_keeps_previous_behavior() {
+        // An unterminated argument list is not consumed, as before.
+        assert_eq!(
+            parse_expression("f(1,"),
+            Ok(("(1,", Expression::Var("f".to_string())))
+        );
+        assert_eq!(
+            parse_expression("f(1)(2,"),
+            Ok(("(2,", Expression::FuncCall("f".to_string(), vec![int(1)])))
+        );
     }
 }

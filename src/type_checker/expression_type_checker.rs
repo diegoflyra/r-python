@@ -38,6 +38,9 @@ pub fn check_expr(exp: Expression, env: &Environment<Type>) -> Result<Type, Erro
         Expression::FuncCall(func_name, exp_vec) => {
             check_func_call(func_name.clone(), exp_vec.clone(), env)
         }
+        Expression::IndirectCall(_, _) => Err(String::from(
+            "[Type Error] indirect function calls are not supported yet.",
+        )),
         Expression::Lambda(func) => check_lambda(&func),
         Expression::Constructor(name, args) => check_adt_constructor(name, args, env),
     }
